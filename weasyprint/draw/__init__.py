@@ -92,9 +92,13 @@ def draw_stacking_context(stream, stacking_context):
                 stream.clip()
                 stream.end()
 
-            # Wrap hidden subtrees as Artifact so all content under becomes
-            # artifact when tagging is enabled.
-            with (stream.artifact() if getattr(box, 'aria_hidden', False) else nullcontext()):
+            # Wrap hidden subtrees or margin boxes as Artifact so all content
+            # under becomes artifact when tagging is enabled.
+            is_artifact_subtree = (
+                getattr(box, 'aria_hidden', False) or
+                isinstance(box, boxes.MarginBox)
+            )
+            with (stream.artifact() if is_artifact_subtree else nullcontext()):
                 # Point 3.
                 for child_context in stacking_context.negative_z_contexts:
                     draw_stacking_context(stream, child_context)
