@@ -11,6 +11,8 @@ from .css import get_all_computed_styles
 from .css.counters import CounterStyle
 from .css.targets import TargetCollector
 from .draw import draw_page
+from .html import ascii_lower
+from .formatting_structure import boxes as _boxes
 from .formatting_structure.build import build_formatting_structure
 from .html import get_html_metadata
 from .images import get_image_from_uri as original_get_image_from_uri
@@ -79,6 +81,22 @@ class Page:
 
         gather_anchors(page_box, self.anchors, self.links, self.bookmarks, self.forms)
         self._page_box = page_box
+
+        # Compute and propagate aria-hidden flags across the box tree once.
+        def _set_aria_hidden_flags(box, parent_hidden=False):
+            hidden = parent_hidden
+            if box.element is not None:
+                try:
+                    if ascii_lower(box.element.get('aria-hidden', '')) == 'true':
+                        hidden = True
+                except Exception:
+                    pass
+            box.aria_hidden = hidden
+            if isinstance(box, _boxes.ParentBox):
+                for child in box.children:
+                    _set_aria_hidden_flags(child, hidden)
+
+        _set_aria_hidden_flags(self._page_box, False)
 
     def paint(self, stream, scale=1):
         """Paint the page into the PDF file."""

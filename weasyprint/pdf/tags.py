@@ -119,6 +119,9 @@ def _build_box_tree(box, parent, pdf, page_number, nums, links, tags):
         box = box._box
 
     element_tag = None if box.element is None else box.element_tag
+    # Skip aria-hidden subtrees entirely in the structure tree.
+    if getattr(box, 'aria_hidden', False):
+        return
     tag = _get_pdf_tag(element_tag)
 
     # Special case for html, body, page boxes and margin boxes.
@@ -223,7 +226,9 @@ def _build_box_tree(box, parent, pdf, page_number, nums, links, tags):
             children = child.children if isinstance(child, boxes.LineBox) else [child]
             for child in children:
                 if isinstance(child, boxes.TextBox):
-                    # Add marked element from the stream.
+                    # Add marked element from the stream if present.
+                    if child not in tags:
+                        continue
                     kid = tags.pop(child)
                     assert kid['mcid'] not in nums
                     if tag == 'Link':
@@ -259,10 +264,11 @@ def _build_box_tree(box, parent, pdf, page_number, nums, links, tags):
     else:
         # Add replaced box.
         assert isinstance(box, boxes.ReplacedBox)
-        kid = tags.pop(box)
-        element['K'].append(kid['mcid'])
-        assert kid['mcid'] not in nums
-        nums[kid['mcid']] = element.reference
+        if box in tags:
+            kid = tags.pop(box)
+            element['K'].append(kid['mcid'])
+            assert kid['mcid'] not in nums
+            nums[kid['mcid']] = element.reference
 
     # Link table cells to related headers.
     if tag == 'Table':

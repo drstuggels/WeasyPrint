@@ -13,6 +13,7 @@ from ..stacking import StackingContext
 from .border import draw_border, draw_line, draw_outline, rounded_box, set_mask_border
 from .color import styled_color
 from .text import draw_text
+from contextlib import nullcontext
 
 
 def draw_page(page, stream):
@@ -91,39 +92,42 @@ def draw_stacking_context(stream, stacking_context):
                 stream.clip()
                 stream.end()
 
-            # Point 3.
-            for child_context in stacking_context.negative_z_contexts:
-                draw_stacking_context(stream, child_context)
+            # Wrap hidden subtrees as Artifact so all content under becomes
+            # artifact when tagging is enabled.
+            with (stream.artifact() if getattr(box, 'aria_hidden', False) else nullcontext()):
+                # Point 3.
+                for child_context in stacking_context.negative_z_contexts:
+                    draw_stacking_context(stream, child_context)
 
-            # Point 4.
-            for block in stacking_context.block_level_boxes:
-                set_mask_border(stream, block)
+                # Point 4.
+                for block in stacking_context.block_level_boxes:
+                    set_mask_border(stream, block)
 
-                if isinstance(block, boxes.TableBox):
-                    draw_table(stream, block)
-                else:
-                    draw_background(stream, block.background)
-                    draw_border(stream, block)
+                    if isinstance(block, boxes.TableBox):
+                        draw_table(stream, block)
+                    else:
+                        draw_background(stream, block.background)
+                        draw_border(stream, block)
 
-            # Point 5.
-            for child_context in stacking_context.float_contexts:
-                draw_stacking_context(stream, child_context)
+                # Point 5.
+                for child_context in stacking_context.float_contexts:
+                    draw_stacking_context(stream, child_context)
 
-            # Point 6.
-            if isinstance(box, boxes.InlineBox):
-                draw_inline_level(stream, stacking_context.page, box)
+                # Point 6.
+                if isinstance(box, boxes.InlineBox):
+                    draw_inline_level(stream, stacking_context.page, box)
 
-            # Point 7.
-            draw_block_level(
-                stacking_context.page, stream, {box: stacking_context.blocks_and_cells})
+                # Point 7.
+                draw_block_level(
+                    stacking_context.page, stream, {box: stacking_context.blocks_and_cells})
 
-            # Point 8.
-            for child_context in stacking_context.zero_z_contexts:
-                draw_stacking_context(stream, child_context)
+                # Point 8.
+                for child_context in stacking_context.zero_z_contexts:
+                    draw_stacking_context(stream, child_context)
 
-            # Point 9.
-            for child_context in stacking_context.positive_z_contexts:
-                draw_stacking_context(stream, child_context)
+                # Point 9.
+                for child_context in stacking_context.positive_z_contexts:
+                    draw_stacking_context(stream, child_context)
 
         # Point 10.
         draw_outline(stream, box)
@@ -524,7 +528,11 @@ def draw_inline_level(stream, page, box, offset_x=0, text_overflow='clip',
         else:
             assert isinstance(box, boxes.TextBox)
             # Should only happen for list markers.
-            draw_text(stream, box, offset_x, text_overflow)
+            if getattr(box, 'aria_hidden', False):
+                with stream.artifact():
+                    draw_text(stream, box, offset_x, text_overflow)
+            else:
+                draw_text(stream, box, offset_x, text_overflow)
 
 
 def draw_block_level(page, stream, blocks_and_cells):

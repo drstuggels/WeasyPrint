@@ -261,12 +261,15 @@ class Stream(pydyf.Stream):
     @contextmanager
     def marked(self, box, tag):
         if self._tags is not None:
-            property_list = None
-            mcid = len(self._tags)
-            assert box not in self._tags
-            self._tags[box] = {'tag': tag, 'mcid': mcid}
-            property_list = pydyf.Dictionary({'MCID': mcid})
-            super().begin_marked_content(tag, property_list)
+            # If this box is hidden to AT, emit Artifact and don't record MCID.
+            if getattr(box, 'aria_hidden', False):
+                super().begin_marked_content('Artifact')
+            else:
+                mcid = len(self._tags)
+                assert box not in self._tags
+                self._tags[box] = {'tag': tag, 'mcid': mcid}
+                property_list = pydyf.Dictionary({'MCID': mcid})
+                super().begin_marked_content(tag, property_list)
         try:
             yield
         finally:

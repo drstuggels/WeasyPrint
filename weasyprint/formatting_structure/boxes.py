@@ -83,6 +83,7 @@ class Box:
     missing_link = None
     link_annotation = None
     force_fragmentation = False
+    aria_hidden = False
 
     # Default, overriden on some subclasses
     def all_children(self):
