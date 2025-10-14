@@ -684,9 +684,12 @@ class SVG:
         # Get fill data
         fill_source, fill_color = self.get_paint(node.get('fill', 'black'))
         fill_opacity = alpha_value(node.get('fill-opacity', 1))
-        fill_in_gradient = fill_source in self.gradients
-        fill_in_pattern = fill_source in self.patterns
-        if fill_color and not (fill_in_gradient or fill_in_pattern):
+        # Set fill paint before path construction to avoid illegal operators
+        # during an active path (PathObject) state.
+        if fill_source in self.gradients or fill_source in self.patterns:
+            draw_gradient_or_pattern(
+                self, node, fill_source, font_size, fill_opacity, stroke=False)
+        elif fill_color:
             stream_color = color(fill_color)
             stream_color.alpha *= fill_opacity
             self.stream.set_color(stream_color)
@@ -694,9 +697,10 @@ class SVG:
         # Get stroke data
         stroke_source, stroke_color = self.get_paint(node.get('stroke'))
         stroke_opacity = alpha_value(node.get('stroke-opacity', 1))
-        stroke_in_gradient = stroke_source in self.gradients
-        stroke_in_pattern = stroke_source in self.patterns
-        if stroke_color and not (stroke_in_gradient or stroke_in_pattern):
+        if stroke_source in self.gradients or stroke_source in self.patterns:
+            draw_gradient_or_pattern(
+                self, node, stroke_source, font_size, stroke_opacity, stroke=True)
+        elif stroke_color:
             stream_color = color(stroke_color)
             stream_color.alpha *= stroke_opacity
             self.stream.set_color(stream_color, stroke=True)
@@ -746,43 +750,56 @@ class SVG:
         self.stream.set_miter_limit(miter_limit)
 
     def fill_stroke(self, node, font_size, text=False):
-        """Paint fill and stroke for a node."""
-        # Get fill data
+        """Paint fill and stroke for a node.
+
+        When rendering text (text=True), avoid emitting color-space or
+        ExtGState changes inside a text object (BT/ET). Colors and line
+        parameters should have been set beforehand via set_graphical_state.
+        For non-text nodes, paints are also prepared beforehand to avoid
+        illegal operators during a PathObject.
+        """
+        # Get paint sources
         fill_source, fill_color = self.get_paint(node.get('fill', 'black'))
-        fill_opacity = alpha_value(node.get('fill-opacity', 1))
-        fill_drawn = draw_gradient_or_pattern(
-            self, node, fill_source, font_size, fill_opacity, stroke=False)
-        fill = fill_color or fill_drawn
-
-        # Get stroke data
         stroke_source, stroke_color = self.get_paint(node.get('stroke'))
-        stroke_opacity = alpha_value(node.get('stroke-opacity', 1))
-        stroke_drawn = draw_gradient_or_pattern(
-            self, node, stroke_source, font_size, stroke_opacity, stroke=True)
-        stroke_width = self.length(node.get('stroke-width', '1px'), font_size)
-        stroke = (stroke_color or stroke_drawn) and stroke_width
 
-        # Fill and stroke
-        even_odd = node.get('fill-rule') == 'evenodd'
         if text:
+            # For text, set paints and choose text rendering mode
+            fill_opacity = alpha_value(node.get('fill-opacity', 1))
+            fill_drawn = draw_gradient_or_pattern(
+                self, node, fill_source, font_size, fill_opacity, stroke=False)
+            fill = fill_color or fill_drawn
+
+            stroke_opacity = alpha_value(node.get('stroke-opacity', 1))
+            stroke_drawn = draw_gradient_or_pattern(
+                self, node, stroke_source, font_size, stroke_opacity, stroke=True)
+            stroke_width = self.length(node.get('stroke-width', '1px'), font_size)
+            stroke = (stroke_color or stroke_drawn) and stroke_width
+
             if stroke and fill:
-                text_rendering = 2
+                text_rendering = 2  # fill then stroke
             elif stroke:
-                text_rendering = 1
+                text_rendering = 1  # stroke
             elif fill:
-                text_rendering = 0
+                text_rendering = 0  # fill
             else:
-                text_rendering = 3
+                text_rendering = 3  # invisible
             self.stream.set_text_rendering(text_rendering)
+            return
+
+        # For non-text nodes, just decide what to paint; paints already set
+        stroke_width = self.length(node.get('stroke-width', '1px'), font_size)
+        fill = bool(fill_color) or (fill_source in self.gradients or fill_source in self.patterns)
+        stroke = ((bool(stroke_color) or (stroke_source in self.gradients or stroke_source in self.patterns)) and bool(stroke_width))
+
+        even_odd = node.get('fill-rule') == 'evenodd'
+        if fill and stroke:
+            self.stream.fill_and_stroke(even_odd)
+        elif stroke:
+            self.stream.stroke()
+        elif fill:
+            self.stream.fill(even_odd)
         else:
-            if fill and stroke:
-                self.stream.fill_and_stroke(even_odd)
-            elif stroke:
-                self.stream.stroke()
-            elif fill:
-                self.stream.fill(even_odd)
-            else:
-                self.stream.end()
+            self.stream.end()
 
     def transform(self, node, font_size):
         """Apply a transformation string to the node."""
