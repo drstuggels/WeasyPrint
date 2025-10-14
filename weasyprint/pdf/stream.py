@@ -20,6 +20,7 @@ class Stream(pydyf.Stream):
         self._resources = resources
         self._images = images
         self._tags = tags
+        self._artifact_depth = 0
         self._current_color = self._current_color_stroke = None
         self._current_alpha = self._current_alpha_stroke = None
         self._current_font = self._current_font_size = None
@@ -44,7 +45,10 @@ class Stream(pydyf.Stream):
             kwargs['tags'] = self._tags
         if 'compress' not in kwargs:
             kwargs['compress'] = self.compress
-        return Stream(**kwargs)
+        cloned = Stream(**kwargs)
+        # Propagate artifact nesting depth to cloned streams (groups, patterns).
+        cloned._artifact_depth = getattr(self, '_artifact_depth', 0)
+        return cloned
 
     @property
     def ctm(self):
@@ -260,31 +264,43 @@ class Stream(pydyf.Stream):
 
     @contextmanager
     def marked(self, box, tag):
+        began = False
         if self._tags is not None:
+            # If already inside an Artifact, don't open tagged content.
+            if self._artifact_depth > 0:
+                began = False
             # If this box is hidden to AT, emit Artifact and don't record MCID.
-            if getattr(box, 'aria_hidden', False):
+            elif getattr(box, 'aria_hidden', False):
                 super().begin_marked_content('Artifact')
+                began = True
             else:
                 mcid = len(self._tags)
                 assert box not in self._tags
                 self._tags[box] = {'tag': tag, 'mcid': mcid}
                 property_list = pydyf.Dictionary({'MCID': mcid})
                 super().begin_marked_content(tag, property_list)
+                began = True
         try:
             yield
         finally:
-            if self._tags is not None:
+            if self._tags is not None and began:
                 super().end_marked_content()
 
     @contextmanager
     def artifact(self):
+        began = False
         if self._tags is not None:
-            super().begin_marked_content('Artifact')
+            if self._artifact_depth == 0:
+                super().begin_marked_content('Artifact')
+                began = True
+            self._artifact_depth += 1
         try:
             yield
         finally:
             if self._tags is not None:
-                super().end_marked_content()
+                self._artifact_depth -= 1
+                if began:
+                    super().end_marked_content()
 
     @staticmethod
     def create_interpolation_function(domain, c0, c1, n):
