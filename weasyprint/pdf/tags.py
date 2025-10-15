@@ -321,6 +321,16 @@ def _build_box_tree(
                 'O': '/Table',
                 'Scope': scope_value,
             })
+        # Add ColSpan/RowSpan when greater than 1
+        colspan = getattr(box, 'colspan', 1)
+        rowspan = getattr(box, 'rowspan', 1)
+        if colspan > 1 or rowspan > 1:
+            attr = element.get('A') or pydyf.Dictionary({'O': '/Table'})
+            if colspan > 1:
+                attr['ColSpan'] = colspan
+            if rowspan > 1:
+                attr['RowSpan'] = rowspan
+            element['A'] = attr
         # Register the ID so that Headers can be resolved algorithmically.
         id_tree['Names'].append(th_id)
         id_tree['Names'].append(element.reference)
@@ -329,6 +339,16 @@ def _build_box_tree(
         # Store table cell element to map it to headers later.
         # Do not mutate the box; keep a side mapping instead.
         cell_elements[box] = element
+        # Add ColSpan/RowSpan early, will be merged with Headers later
+        colspan = getattr(box, 'colspan', 1)
+        rowspan = getattr(box, 'rowspan', 1)
+        if colspan > 1 or rowspan > 1:
+            attr = pydyf.Dictionary({'O': '/Table'})
+            if colspan > 1:
+                attr['ColSpan'] = colspan
+            if rowspan > 1:
+                attr['RowSpan'] = rowspan
+            element['A'] = attr
 
     # Include link annotations.
     if box.link_annotation:
@@ -583,16 +603,14 @@ def _build_box_tree(
                         pydyf.String(tok) for tok in cell.element.attrib.get('headers', '').split()
                     ]
                     if explicit_ids:
-                        elem['A'] = pydyf.Dictionary({
-                            'O': '/Table',
-                            'Headers': pydyf.Array(explicit_ids),
-                        })
+                        attr = elem.get('A') or pydyf.Dictionary({'O': '/Table'})
+                        attr['Headers'] = pydyf.Array(explicit_ids)
+                        elem['A'] = attr
                         continue
                 # Fallback to inferred headers if any
                 if cell in td_headers and td_headers[cell]:
-                    elem['A'] = pydyf.Dictionary({
-                        'O': '/Table',
-                        'Headers': pydyf.Array(td_headers[cell]),
-                    })
+                    attr = elem.get('A') or pydyf.Dictionary({'O': '/Table'})
+                    attr['Headers'] = pydyf.Array(td_headers[cell])
+                    elem['A'] = attr
 
     yield element
