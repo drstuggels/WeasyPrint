@@ -94,6 +94,9 @@ PARSER.add_argument(
 PARSER.add_argument(
     '--pdf-tags', action='store_true', help='tag PDF for accessibility')
 PARSER.add_argument(
+    '--fix-headings-per-page', action='store_true',
+    help='retag headings per page to a proper hierarchy (H1..Hn contiguous)')
+PARSER.add_argument(
     '--uncompressed-pdf', action='store_true',
     help='do not compress PDF content, mainly for debugging purpose')
 PARSER.add_argument(

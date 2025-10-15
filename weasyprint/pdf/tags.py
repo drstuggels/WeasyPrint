@@ -9,7 +9,7 @@ from ..layout.absolute import AbsolutePlaceholder
 from ..logger import LOGGER
 
 
-def add_tags(pdf, document, page_streams):
+def add_tags(pdf, document, page_streams, fix_headings_per_page=False):
     """Add tag tree to the document."""
 
     # Add root structure.
@@ -96,6 +96,53 @@ def add_tags(pdf, document, page_streams):
         element['K'] = pydyf.Array(new_k)
 
     _collapse_divs(structure_document)
+
+    # Optionally fix heading levels per page (normalize to contiguous H1..Hn).
+    if fix_headings_per_page:
+        page_refs = list(pdf.page_references)
+
+        # Traverse tree in order to collect headings by page in reading order.
+        headings_by_page = {ref: [] for ref in page_refs}
+
+        def _traverse(elem):
+            # Record heading element itself if on a known page.
+            tag_name = elem.get('S')
+            if tag_name and isinstance(tag_name, str) and tag_name.startswith('/H'):
+                pg = elem.get('Pg')
+                if pg in headings_by_page:
+                    headings_by_page[pg].append(elem)
+            # Recurse into children in-order.
+            for item in elem.get('K', []):
+                if item in struct_map:
+                    _traverse(struct_map[item])
+
+        _traverse(structure_document)
+
+        # For each page, compute mapping and retag headings.
+        for ref in page_refs:
+            headings = headings_by_page.get(ref, [])
+            if not headings:
+                continue
+            levels = []
+            for h in headings:
+                try:
+                    level = int(h['S'][2:])
+                    if level not in levels:
+                        levels.append(level)
+                except Exception:
+                    continue
+            if not levels:
+                continue
+            levels.sort()
+            mapping = {orig: i + 1 for i, orig in enumerate(levels)}
+            for h in headings:
+                try:
+                    old_level = int(h['S'][2:])
+                except Exception:
+                    continue
+                new_level = mapping.get(old_level)
+                if new_level:
+                    h['S'] = f'/H{new_level}'
 
     # Add required metadata.
     pdf.catalog['ViewerPreferences'] = pydyf.Dictionary({'DisplayDocTitle': 'true'})

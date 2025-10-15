@@ -328,7 +328,7 @@ def generate_pdf(document, target, zoom, **options):
 
     # Add tags
     if pdf_tags:
-        add_tags(pdf, document, page_streams)
+        add_tags(pdf, document, page_streams, fix_headings_per_page=options.get('fix_headings_per_page'))
 
     # Apply PDF variants functions
     if variant:

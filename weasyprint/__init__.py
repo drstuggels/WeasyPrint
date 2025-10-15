@@ -74,6 +74,7 @@ DEFAULT_OPTIONS = {
     'pdf_version': None,
     'pdf_forms': None,
     'pdf_tags': False,
+    'fix_headings_per_page': False,
     'uncompressed_pdf': False,
     'custom_metadata': False,
     'presentational_hints': False,
