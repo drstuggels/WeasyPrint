@@ -113,6 +113,11 @@ def _get_pdf_tag(tag):
         return tag[:2].upper() + tag[2:]
     elif tag == 'img':
         return 'Figure'
+    elif tag == 'figure':
+        return 'Figure'
+    elif isinstance(tag, str) and (tag == 'svg' or tag.endswith('}svg')):
+        # Inline SVG elements (with or without XML namespace) are figures
+        return 'Figure'
     elif tag in ('caption', 'figcaption'):
         return 'Caption'
     else:
@@ -192,18 +197,22 @@ def _build_box_tree(
 
     # Handle special cases.
     if tag == 'Figure':
-        # Add extra data for images.
+        # Add layout bbox for figures. Also set Alt.
         x1, y1 = box.content_box_x(), box.content_box_y()
         x2, y2 = x1 + box.width, y1 + box.height
         element['A'] = pydyf.Dictionary({
             'O': '/Layout',
             'BBox': pydyf.Array((x1, y1, x2, y2)),
         })
-        if alt := box.element.attrib.get('alt'):
-            element['Alt'] = pydyf.String(alt)
-        else:
-            source = box.element.attrib.get('src', 'unknown')
-            LOGGER.error(f'Image "{source}" has no required alt description')
+        # Always set Alt on /Figure. For <img>/<svg>/<figure>, use HTML alt
+        # when present; otherwise set empty string.
+        alt_value = ''
+        if box.element is not None:
+            if element_tag in ('img', 'figure') or (
+                isinstance(element_tag, str) and (element_tag == 'svg' or element_tag.endswith('}svg'))
+            ):
+                alt_value = box.element.attrib.get('alt', '')
+        element['Alt'] = pydyf.String(alt_value)
     elif tag == 'Table':
         # Use wrapped table as tagged box, and put captions in it.
         wrapper, table = box, box.get_wrapped_table()
@@ -255,6 +264,31 @@ def _build_box_tree(
         element['K'].append(object_reference.reference)
 
     if isinstance(box, boxes.ParentBox):
+        # Special flattening for <figure>: don’t create child StructElems,
+        # append MCIDs of descendants directly into this Figure element.
+        if element['S'] == '/Figure' and element_tag == 'figure':
+            def _collect_mcids(node):
+                # Traverse node and append any MCIDs found directly to element.
+                if isinstance(node, (boxes.TextBox, boxes.ReplacedBox)) and node in tags:
+                    kid = tags.pop(node)
+                    mcid = kid['mcid']
+                    assert mcid not in nums
+                    element['K'].append(mcid)
+                    nums[mcid] = element.reference
+                if isinstance(node, boxes.ParentBox):
+                    children = node.children
+                    for child in children:
+                        if isinstance(child, boxes.LineBox):
+                            for gc in child.children:
+                                _collect_mcids(gc)
+                        else:
+                            _collect_mcids(child)
+
+            for child in box.children:
+                _collect_mcids(child)
+            # We’re done for figures; don’t nest structure elements inside.
+            yield element
+            return
         # Build tree for box children.
         for child in box.children:
             children = child.children if isinstance(child, boxes.LineBox) else [child]
