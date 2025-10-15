@@ -38,6 +38,7 @@ def add_tags(pdf, document, page_streams):
     content_mapping['Nums'] = pydyf.Array()
     id_mapping['Names'] = pydyf.Array()
     links = []
+    struct_map = {}
     for page_number, (page, stream) in enumerate(zip(document.pages, page_streams)):
         tags = stream._tags
         page_box = page._page_box
@@ -52,7 +53,7 @@ def add_tags(pdf, document, page_streams):
         cell_elements = {}
         elements = _build_box_tree(
             page_box, structure_document, pdf, page_number,
-            page_nums, links, tags, id_mapping, cell_elements)
+            page_nums, links, tags, id_mapping, cell_elements, struct_map)
         for element in elements:
             structure_document['K'].append(element.reference)
         assert not tags
@@ -66,6 +67,35 @@ def add_tags(pdf, document, page_streams):
         content_mapping['Nums'].append(i)
         content_mapping['Nums'].append(link_reference)
         annotation['StructParent'] = i
+
+    # Post-process to collapse empty/single-child divs in the structure tree.
+    def _collapse_divs(element):
+        # Process children first
+        new_k = []
+        for item in list(element.get('K', [])):
+            # Recurse into child struct elements when we know about them
+            if item in struct_map:
+                child = struct_map[item]
+                _collapse_divs(child)
+                # After recursion, apply collapsing rules on child if it is a Div
+                if child.get('S') == '/Div':
+                    child_k = list(child.get('K', []))
+                    if len(child_k) == 0:
+                        # Drop empty div
+                        continue
+                    if len(child_k) == 1:
+                        # Replace div by its single child
+                        single = child_k[0]
+                        # Update parent of moved struct element
+                        if single in struct_map:
+                            struct_map[single]['P'] = element.reference
+                        new_k.append(single)
+                        continue
+            new_k.append(item)
+        # Assign collapsed children
+        element['K'] = pydyf.Array(new_k)
+
+    _collapse_divs(structure_document)
 
     # Add required metadata.
     pdf.catalog['ViewerPreferences'] = pydyf.Dictionary({'DisplayDocTitle': 'true'})
@@ -125,7 +155,7 @@ def _get_pdf_tag(tag):
 
 
 def _build_box_tree(
-    box, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements
+    box, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements, struct_map
 ):
     """Recursively build tag tree for given box and yield children."""
 
@@ -145,14 +175,14 @@ def _build_box_tree(
         if isinstance(box, boxes.ParentBox) and not isinstance(box, boxes.LineBox):
             for child in box.children:
                 yield from _build_box_tree(
-                    child, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements)
+                    child, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements, struct_map)
             return
     elif isinstance(box, boxes.MarginBox):
         # Build tree for margin boxes but don’t link it to main tree. It ensures that
         # marked content is mapped in document and removed from list. It could be
         # included in tree as Artifact, but that’s only allowed in PDF 2.0.
         for child in box.children:
-            tuple(_build_box_tree(child, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements))
+            tuple(_build_box_tree(child, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements, struct_map))
         return
 
     # Create box element.
@@ -180,7 +210,8 @@ def _build_box_tree(
                 'P': parent.reference,
             })
             pdf.add_object(parent)
-            children = _build_box_tree(box, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements)
+            struct_map[parent.reference] = parent
+            children = _build_box_tree(box, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements, struct_map)
             for child in children:
                 parent['K'].append(child.reference)
             yield parent
@@ -194,6 +225,7 @@ def _build_box_tree(
         'P': parent.reference,
     })
     pdf.add_object(element)
+    struct_map[element.reference] = element
 
     # Handle special cases.
     if tag == 'Figure':
@@ -312,6 +344,7 @@ def _build_box_tree(
                             'P': element.reference,
                         })
                         pdf.add_object(kid_element)
+                        struct_map[kid_element.reference] = kid_element
                         element['K'].append(kid_element.reference)
                         nums[kid['mcid']] = kid_element.reference
                 else:
@@ -323,7 +356,7 @@ def _build_box_tree(
                     else:
                         child_parent = element
                     child_elements = _build_box_tree(
-                        child, child_parent, pdf, page_number, nums, links, tags, id_tree, cell_elements)
+                        child, child_parent, pdf, page_number, nums, links, tags, id_tree, cell_elements, struct_map)
 
                     # Check if it is already been referenced before.
                     for child_element in child_elements:
