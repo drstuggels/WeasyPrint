@@ -472,6 +472,20 @@ def table_layout(context, table, bottom_space, skip_stack, containing_block,
         else:
             header = None
 
+        # If this is a continuation fragment (skip_stack is not None),
+        # mark the repeated header subtree so it is emitted as Artifact
+        # instead of tagged content during PDF generation.
+        if header is not None and skip_stack is not None:
+            def _mark_extra_thead(box):
+                try:
+                    box.extra_thead = True  # Custom flag consumed by PDF output
+                except Exception:
+                    pass
+                if hasattr(box, 'children') and box.children:
+                    for _child in box.children:
+                        _mark_extra_thead(_child)
+            _mark_extra_thead(header)
+
         if has_footer:
             footer = table.children[-1]
             footer, resume_at, next_page = group_layout(

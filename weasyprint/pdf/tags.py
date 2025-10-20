@@ -9,6 +9,27 @@ from ..layout.absolute import AbsolutePlaceholder
 from ..logger import LOGGER
 
 
+def _unique(seq, key=str):
+    seen = set()
+    out = []
+    for item in seq:
+        k = key(item)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(item)
+    return out
+
+class TagState:
+    def __init__(self, id_tree):
+        self.id_tree = id_tree
+        self.seen_header_ids = {}
+        self.rewrites_by_table = {}
+        self.ids_in_table = defaultdict(set)
+        self.logical_tables = {}
+        self.struct_map = {}
+
+
 def add_tags(pdf, document, page_streams, fix_headings_per_page=False):
     """Add tag tree to the document."""
 
@@ -37,8 +58,8 @@ def add_tags(pdf, document, page_streams, fix_headings_per_page=False):
     # Map content.
     content_mapping['Nums'] = pydyf.Array()
     id_mapping['Names'] = pydyf.Array()
+    state = TagState(id_mapping)
     links = []
-    struct_map = {}
     for page_number, (page, stream) in enumerate(zip(document.pages, page_streams)):
         tags = stream._tags
         page_box = page._page_box
@@ -53,7 +74,7 @@ def add_tags(pdf, document, page_streams, fix_headings_per_page=False):
         cell_elements = {}
         elements = _build_box_tree(
             page_box, structure_document, pdf, page_number,
-            page_nums, links, tags, id_mapping, cell_elements, struct_map)
+            page_nums, links, tags, state, cell_elements, current_table=None)
         for element in elements:
             structure_document['K'].append(element.reference)
         assert not tags
@@ -74,8 +95,8 @@ def add_tags(pdf, document, page_streams, fix_headings_per_page=False):
         new_k = []
         for item in list(element.get('K', [])):
             # Recurse into child struct elements when we know about them
-            if item in struct_map:
-                child = struct_map[item]
+            if item in state.struct_map:
+                child = state.struct_map[item]
                 _collapse_divs(child)
                 # After recursion, apply collapsing rules on child if it is a Div
                 if child.get('S') == '/Div':
@@ -87,8 +108,8 @@ def add_tags(pdf, document, page_streams, fix_headings_per_page=False):
                         # Replace div by its single child
                         single = child_k[0]
                         # Update parent of moved struct element
-                        if single in struct_map:
-                            struct_map[single]['P'] = element.reference
+                        if single in state.struct_map:
+                            state.struct_map[single]['P'] = element.reference
                         new_k.append(single)
                         continue
             new_k.append(item)
@@ -113,8 +134,8 @@ def add_tags(pdf, document, page_streams, fix_headings_per_page=False):
                     headings_by_page[pg].append(elem)
             # Recurse into children in-order.
             for item in elem.get('K', []):
-                if item in struct_map:
-                    _traverse(struct_map[item])
+                if item in state.struct_map:
+                    _traverse(state.struct_map[item])
 
         _traverse(structure_document)
 
@@ -202,7 +223,7 @@ def _get_pdf_tag(tag):
 
 
 def _build_box_tree(
-    box, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements, struct_map
+    box, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table
 ):
     """Recursively build tag tree for given box and yield children."""
 
@@ -222,14 +243,14 @@ def _build_box_tree(
         if isinstance(box, boxes.ParentBox) and not isinstance(box, boxes.LineBox):
             for child in box.children:
                 yield from _build_box_tree(
-                    child, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements, struct_map)
+                    child, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table)
             return
     elif isinstance(box, boxes.MarginBox):
         # Build tree for margin boxes but don’t link it to main tree. It ensures that
         # marked content is mapped in document and removed from list. It could be
         # included in tree as Artifact, but that’s only allowed in PDF 2.0.
         for child in box.children:
-            tuple(_build_box_tree(child, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements, struct_map))
+            tuple(_build_box_tree(child, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table))
         return
 
     # Create box element.
@@ -257,8 +278,8 @@ def _build_box_tree(
                 'P': parent.reference,
             })
             pdf.add_object(parent)
-            struct_map[parent.reference] = parent
-            children = _build_box_tree(box, parent, pdf, page_number, nums, links, tags, id_tree, cell_elements, struct_map)
+            state.struct_map[parent.reference] = parent
+            children = _build_box_tree(box, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table)
             for child in children:
                 parent['K'].append(child.reference)
             yield parent
@@ -272,7 +293,7 @@ def _build_box_tree(
         'P': parent.reference,
     })
     pdf.add_object(element)
-    struct_map[element.reference] = element
+    state.struct_map[element.reference] = element
 
     # Handle special cases.
     if tag == 'Figure':
@@ -298,6 +319,33 @@ def _build_box_tree(
         box = table.copy_with_children([])
         for child in wrapper.children:
             box.children.extend(child.children if child is table else [child])
+        # Detect logical table key to merge fragments: use DOM element id when available,
+        # otherwise use THEAD TH id signature.
+        def _table_logical_key(table_box):
+            if table_box.element is not None:
+                return ('elem', id(table_box.element))
+            # Fallback: use THEAD TH ids sequence as signature
+            thead_ids = []
+            for group in table_box.children:
+                if getattr(group, 'element_tag', None) == 'thead':
+                    for row in group.children:
+                        for cell in row.children:
+                            if getattr(cell, 'element_tag', None) == 'th' and cell.element is not None:
+                                cid = cell.element.attrib.get('id')
+                                if cid:
+                                    thead_ids.append(cid)
+                    break
+            if thead_ids:
+                return ('thead', tuple(thead_ids))
+            return None
+
+        key = _table_logical_key(table)
+        continuation = key in state.logical_tables if key is not None else False
+        target_table_elem = None
+        if continuation:
+            target_table_elem = state.logical_tables[key]
+        # Assign a unique identifier for this table context (for ID rewrite)
+        table_uid = id(target_table_elem) if continuation else id(table)
     elif tag == 'TH':
         # Set identifier for table headers to reference them in cells
         # and register it in the document ID tree.
@@ -305,7 +353,31 @@ def _build_box_tree(
         html_id = None
         if box.element is not None:
             html_id = box.element.attrib.get('id')
-        th_id = pydyf.String(html_id if html_id else id(box))
+        # Rewrite duplicate IDs across tables to keep Names unique
+        if html_id:
+            # Warn on duplicates within the same table
+            if current_table is not None:
+                if html_id in state.ids_in_table[current_table]:
+                    LOGGER.warning(
+                        'Duplicate header id "%s" within the same table; header associations may be ambiguous',
+                        html_id)
+                else:
+                    state.ids_in_table[current_table].add(html_id)
+            owner = state.seen_header_ids.get(html_id)
+            if owner is None and current_table is not None:
+                state.seen_header_ids[html_id] = current_table
+                assigned = html_id
+            elif owner == current_table or current_table is None:
+                assigned = html_id
+            else:
+                # Duplicate in another table: rewrite locally
+                new_id = f"{html_id}__t{current_table}"
+                rewrites = state.rewrites_by_table.setdefault(current_table, {})
+                rewrites[html_id] = new_id
+                assigned = new_id
+        else:
+            assigned = str(id(box))
+        th_id = pydyf.String(assigned)
         element['ID'] = th_id
         # Add Scope attribute when available from HTML.
         scope_attr = None
@@ -332,8 +404,8 @@ def _build_box_tree(
                 attr['RowSpan'] = rowspan
             element['A'] = attr
         # Register the ID so that Headers can be resolved algorithmically.
-        id_tree['Names'].append(th_id)
-        id_tree['Names'].append(element.reference)
+        state.id_tree['Names'].append(th_id)
+        state.id_tree['Names'].append(element.reference)
         cell_elements[box] = element
     elif tag == 'TD':
         # Store table cell element to map it to headers later.
@@ -392,6 +464,26 @@ def _build_box_tree(
         for child in box.children:
             children = child.children if isinstance(child, boxes.LineBox) else [child]
             for child in children:
+                # If we're processing a continuation fragment of a logical table,
+                # skip adding a duplicate THEAD, but still consume its MCIDs.
+                if tag == 'Table' and target_table_elem is not None and continuation:
+                    if getattr(child, 'element_tag', None) == 'thead':
+                        # Repeated headers are drawn as Artifacts (see layout),
+                        # so they should not appear in the structure tree.
+                        # Ensure we don't build structure for this THEAD.
+                        # Any residual tags are ignored.
+                        def _consume_tags(node):
+                            if isinstance(node, (boxes.TextBox, boxes.ReplacedBox)) and node in tags:
+                                tags.pop(node)
+                            if isinstance(node, boxes.ParentBox):
+                                for sub in (node.children or ()):  # safety
+                                    if isinstance(sub, boxes.LineBox):
+                                        for gc in sub.children:
+                                            _consume_tags(gc)
+                                    else:
+                                        _consume_tags(sub)
+                        _consume_tags(child)
+                        continue
                 if isinstance(child, boxes.TextBox):
                     # Add marked element from the stream if present.
                     if child not in tags:
@@ -411,7 +503,7 @@ def _build_box_tree(
                             'P': element.reference,
                         })
                         pdf.add_object(kid_element)
-                        struct_map[kid_element.reference] = kid_element
+                        state.struct_map[kid_element.reference] = kid_element
                         element['K'].append(kid_element.reference)
                         nums[kid['mcid']] = kid_element.reference
                 else:
@@ -421,9 +513,14 @@ def _build_box_tree(
                         # HTML, nested lists are linked to a parent’s list item.
                         child_parent = parent
                     else:
-                        child_parent = element
+                        # Route children of table fragments to the original table element
+                        child_parent = target_table_elem if (tag == 'Table' and target_table_elem is not None) else element
+                    # Propagate table context to children: if current element is a table, switch context
+                    next_table = current_table
+                    if tag == 'Table':
+                        next_table = table_uid
                     child_elements = _build_box_tree(
-                        child, child_parent, pdf, page_number, nums, links, tags, id_tree, cell_elements, struct_map)
+                        child, child_parent, pdf, page_number, nums, links, tags, state, cell_elements, next_table)
 
                     # Check if it is already been referenced before.
                     for child_element in child_elements:
@@ -483,6 +580,10 @@ def _build_box_tree(
 
         # Helper to compute TH id string used in PDF Headers mapping.
         def th_id_string(th_cell):
+            # Prefer already-assigned ID stored on the StructElem
+            el = cell_elements.get(th_cell)
+            if el is not None and 'ID' in el:
+                return el['ID']
             html_id = None
             if th_cell.element is not None:
                 html_id = th_cell.element.attrib.get('id')
@@ -599,9 +700,14 @@ def _build_box_tree(
                 if elem is None:
                     continue
                 if cell.element is not None and 'headers' in cell.element.attrib:
-                    explicit_ids = [
-                        pydyf.String(tok) for tok in cell.element.attrib.get('headers', '').split()
-                    ]
+                    # Rewrite explicit headers to local table IDs when needed
+                    raw_tokens = cell.element.attrib.get('headers', '').split()
+                    # Find this table uid from earlier (use original target when merging)
+                    local_table = id(target_table_elem) if continuation else table_uid
+                    rewrites = state.rewrites_by_table.get(local_table, {})
+                    # Deduplicate while preserving order
+                    mapped = [rewrites.get(tok, tok) for tok in raw_tokens]
+                    explicit_ids = [pydyf.String(t) for t in _unique(mapped)]
                     if explicit_ids:
                         attr = elem.get('A') or pydyf.Dictionary({'O': '/Table'})
                         attr['Headers'] = pydyf.Array(explicit_ids)
@@ -609,8 +715,25 @@ def _build_box_tree(
                         continue
                 # Fallback to inferred headers if any
                 if cell in td_headers and td_headers[cell]:
+                    # Deduplicate inferred headers while preserving order
+                    ordered = _unique(td_headers[cell], key=str)
                     attr = elem.get('A') or pydyf.Dictionary({'O': '/Table'})
-                    attr['Headers'] = pydyf.Array(td_headers[cell])
+                    attr['Headers'] = pydyf.Array(ordered)
                     elem['A'] = attr
+
+    # Register first occurrence of a logical table and decide what to yield
+    if tag == 'Table':
+        if not continuation and key is not None:
+            state.logical_tables[key] = element
+            yield element
+            return
+        elif not continuation:
+            # No key: just yield as usual
+            yield element
+            return
+        else:
+            # Continuation: we already appended children under the original
+            # table element, do not yield a new table here.
+            return
 
     yield element

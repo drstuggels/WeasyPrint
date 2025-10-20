@@ -541,11 +541,15 @@ def draw_inline_level(stream, page, box, offset_x=0, text_overflow='clip',
 
 def draw_block_level(page, stream, blocks_and_cells):
     for block, blocks_and_cells in blocks_and_cells.items():
-        if isinstance(block, boxes.ReplacedBox):
-            with stream.marked(block, 'Figure'):
-                draw_replacedbox(stream, block)
-        elif block.children:
-            if isinstance(block.children[-1], boxes.LineBox):
-                for child in block.children:
-                    draw_inline_level(stream, page, child)
-        draw_block_level(page, stream, blocks_and_cells)
+        # if this subtree belongs to a repeated header (extra_thead),
+        # draw it as Artifact so no tagged content (MCIDs) are created inside.
+        artifact_ctx = stream.artifact() if getattr(block, 'extra_thead', False) else nullcontext()
+        with artifact_ctx:
+            if isinstance(block, boxes.ReplacedBox):
+                with stream.marked(block, 'Figure'):
+                    draw_replacedbox(stream, block)
+            elif block.children:
+                if isinstance(block.children[-1], boxes.LineBox):
+                    for child in block.children:
+                        draw_inline_level(stream, page, child)
+            draw_block_level(page, stream, blocks_and_cells)
