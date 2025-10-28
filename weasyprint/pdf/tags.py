@@ -74,7 +74,7 @@ def add_tags(pdf, document, page_streams, fix_headings_per_page=False):
         cell_elements = {}
         elements = _build_box_tree(
             page_box, structure_document, pdf, page_number,
-            page_nums, links, tags, state, cell_elements, current_table=None)
+            page_nums, links, tags, state, cell_elements, current_table=None, in_note_context=False)
         for element in elements:
             structure_document['K'].append(element.reference)
         assert not tags
@@ -223,7 +223,7 @@ def _get_pdf_tag(tag):
 
 
 def _build_box_tree(
-    box, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table
+    box, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table, in_note_context=False
 ):
     """Recursively build tag tree for given box and yield children."""
 
@@ -243,47 +243,64 @@ def _build_box_tree(
         if isinstance(box, boxes.ParentBox) and not isinstance(box, boxes.LineBox):
             for child in box.children:
                 yield from _build_box_tree(
-                    child, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table)
+                    child, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table, in_note_context)
             return
     elif isinstance(box, boxes.MarginBox):
         # Build tree for margin boxes but don’t link it to main tree. It ensures that
         # marked content is mapped in document and removed from list. It could be
         # included in tree as Artifact, but that’s only allowed in PDF 2.0.
         for child in box.children:
-            tuple(_build_box_tree(child, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table))
+            tuple(_build_box_tree(child, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table, in_note_context))
         return
 
     # Create box element.
     if tag == 'LI':
-        anonymous_list_element = parent['S'] == '/LI'
-        anonymous_li_child = parent['S'] == '/LBody'
-        dl_item = box.element_tag in ('dt', 'dd')
-        no_bullet_li = box.element_tag == 'li' and (
-            'list-item' not in box.style['display'] or
-            box.style['list_style_type'] == 'none')
-        if anonymous_list_element:
-            # Store as list item body.
-            tag = 'LBody'
-        elif anonymous_li_child:
-            # Store as non struct list item body child.
+        # DPUB footnotes: when a list item is a footnote (role=doc-footnote),
+        # do not generate PDF list wrappers. It will be mapped to /Note later.
+        if box.element is not None and box.element.attrib.get('role') == 'doc-footnote':
             tag = 'NonStruct'
-        elif dl_item or no_bullet_li:
-            # Wrap in list item.
-            tag = 'LBody'
-            parent = pydyf.Dictionary({
-                'Type': '/StructElem',
-                'S': '/LI',
-                'K': pydyf.Array([]),
-                'Pg': pdf.page_references[page_number],
-                'P': parent.reference,
-            })
-            pdf.add_object(parent)
-            state.struct_map[parent.reference] = parent
-            children = _build_box_tree(box, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table)
-            for child in children:
-                parent['K'].append(child.reference)
-            yield parent
-            return
+        else:
+            anonymous_list_element = parent['S'] == '/LI'
+            anonymous_li_child = parent['S'] == '/LBody'
+            dl_item = box.element_tag in ('dt', 'dd')
+            no_bullet_li = box.element_tag == 'li' and (
+                'list-item' not in box.style['display'] or
+                box.style['list_style_type'] == 'none')
+            if anonymous_list_element:
+                # Store as list item body.
+                tag = 'LBody'
+            elif anonymous_li_child:
+                # Store as non struct list item body child.
+                tag = 'NonStruct'
+            elif dl_item or no_bullet_li:
+                # Wrap in list item.
+                tag = 'LBody'
+                parent = pydyf.Dictionary({
+                    'Type': '/StructElem',
+                    'S': '/LI',
+                    'K': pydyf.Array([]),
+                    'Pg': pdf.page_references[page_number],
+                    'P': parent.reference,
+                })
+                pdf.add_object(parent)
+                state.struct_map[parent.reference] = parent
+                children = _build_box_tree(box, parent, pdf, page_number, nums, links, tags, state, cell_elements, current_table, in_note_context)
+                for child in children:
+                    parent['K'].append(child.reference)
+                yield parent
+                return
+
+    # If this is a list whose children are footnotes, avoid mapping it as /L.
+    if tag == 'L' and isinstance(box, boxes.ParentBox):
+        try:
+            has_footnotes = any(
+                (getattr(child, 'element', None) is not None and
+                 child.element.attrib.get('role') == 'doc-footnote')
+                for child in box.children)
+        except Exception:
+            has_footnotes = False
+        if has_footnotes:
+            tag = 'Div'
 
     element = pydyf.Dictionary({
         'Type': '/StructElem',
@@ -294,6 +311,23 @@ def _build_box_tree(
     })
     pdf.add_object(element)
     state.struct_map[element.reference] = element
+
+    # Override element type based only on DPUB-ARIA roles
+    if box.element is not None:
+        # DPUB roles mapping
+        role = box.element.attrib.get('role')
+        if role == 'doc-noteref':
+            element['S'] = '/Reference'
+        elif role == 'doc-footnote' and not in_note_context and (element_tag in ('li', 'aside', 'section')):
+            element['S'] = '/Note'
+            note_html_id = box.element.attrib.get('id')
+            if note_html_id:
+                element['ID'] = pydyf.String(note_html_id)
+        elif role == 'doc-backlink':
+            element['S'] = '/Link'
+
+    # Track whether we’re inside a /Note to avoid mapping nested notes.
+    child_in_note = in_note_context or element.get('S') == '/Note'
 
     # Handle special cases.
     if tag == 'Figure':
@@ -431,8 +465,23 @@ def _build_box_tree(
             'Pg': pdf.page_references[page_number],
         })
         pdf.add_object(object_reference)
-        links.append((element.reference, annotation))
-        element['K'].append(object_reference.reference)
+        # Ensure annotation is nested inside a /Link element as required.
+        # Also record the correct owner StructElem for ParentTree mapping.
+        if element.get('S') == '/Link':
+            element['K'].append(object_reference.reference)
+            links.append((element.reference, annotation))
+        else:
+            link_elem = pydyf.Dictionary({
+                'Type': '/StructElem',
+                'S': '/Link',
+                'K': pydyf.Array([object_reference.reference]),
+                'Pg': pdf.page_references[page_number],
+                'P': element.reference,
+            })
+            pdf.add_object(link_elem)
+            state.struct_map[link_elem.reference] = link_elem
+            element['K'].append(link_elem.reference)
+            links.append((link_elem.reference, annotation))
 
     if isinstance(box, boxes.ParentBox):
         # Special flattening for <figure>: don’t create child StructElems,
@@ -461,6 +510,24 @@ def _build_box_tree(
             yield element
             return
         # Build tree for box children.
+        reference_link = None
+        if element.get('S') == '/Reference':
+            # Find or create the /Link child to host the label and OBJR
+            for k in element.get('K', []):
+                if k in state.struct_map and state.struct_map[k].get('S') == '/Link':
+                    reference_link = state.struct_map[k]
+                    break
+            if reference_link is None:
+                reference_link = pydyf.Dictionary({
+                    'Type': '/StructElem',
+                    'S': '/Link',
+                    'K': pydyf.Array([]),
+                    'Pg': pdf.page_references[page_number],
+                    'P': element.reference,
+                })
+                pdf.add_object(reference_link)
+                state.struct_map[reference_link.reference] = reference_link
+                element['K'].append(reference_link.reference)
         for child in box.children:
             children = child.children if isinstance(child, boxes.LineBox) else [child]
             for child in children:
@@ -490,7 +557,7 @@ def _build_box_tree(
                         continue
                     kid = tags.pop(child)
                     assert kid['mcid'] not in nums
-                    if tag == 'Link':
+                    if element.get('S') == '/Link':
                         # Associate MCID directly with link reference.
                         element['K'].append(kid['mcid'])
                         nums[kid['mcid']] = element.reference
@@ -520,7 +587,7 @@ def _build_box_tree(
                     if tag == 'Table':
                         next_table = table_uid
                     child_elements = _build_box_tree(
-                        child, child_parent, pdf, page_number, nums, links, tags, state, cell_elements, next_table)
+                        child, child_parent, pdf, page_number, nums, links, tags, state, cell_elements, next_table, child_in_note)
 
                     # Check if it is already been referenced before.
                     for child_element in child_elements:

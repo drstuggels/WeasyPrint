@@ -28,7 +28,7 @@ def rectangle_aabb(matrix, pos_x, pos_y, width, height):
 
 
 def gather_anchors(box, anchors, links, bookmarks, forms, parent_matrix=None,
-                   parent_form=None):
+                   parent_form=None, in_link=False):
     """Gather anchors and other data related to specific positions in PDF.
 
     Currently finds anchors, links, bookmarks and forms.
@@ -85,7 +85,8 @@ def gather_anchors(box, anchors, links, bookmarks, forms, parent_matrix=None,
     anchor_name = box.style['anchor']
     has_bookmark = bookmark_label and bookmark_level
     # 'link' is inherited but redundant on text boxes
-    has_link = link and not isinstance(box, (boxes.TextBox, boxes.LineBox))
+    # Only create one annotation for a link subtree: the outermost element
+    has_link = (not in_link) and link and not isinstance(box, (boxes.TextBox, boxes.LineBox))
     # In case of duplicate IDs, only the first is an anchor.
     has_anchor = anchor_name and anchor_name not in anchors
     is_input = box.is_input()
@@ -126,7 +127,7 @@ def gather_anchors(box, anchors, links, bookmarks, forms, parent_matrix=None,
             anchors[anchor_name] = (pos_x1, pos_y1, pos_x2, pos_y2)
 
     for child in box.all_children():
-        gather_anchors(child, anchors, links, bookmarks, forms, matrix, parent_form)
+        gather_anchors(child, anchors, links, bookmarks, forms, matrix, parent_form, in_link or has_link)
 
 
 def make_page_bookmark_tree(page, skipped_levels, last_by_depth,
