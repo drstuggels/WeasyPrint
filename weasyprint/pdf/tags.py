@@ -148,13 +148,15 @@ def add_tags(pdf, document, page_streams, fix_headings_per_page=False):
             for h in headings:
                 try:
                     level = int(h['S'][2:])
+                    # Record first occurrence order of distinct levels to
+                    # normalize based on reading order, not numeric sort.
                     if level not in levels:
                         levels.append(level)
                 except Exception:
                     continue
             if not levels:
                 continue
-            levels.sort()
+            # Map first-seen level -> H1, next unseen -> H2, etc.
             mapping = {orig: i + 1 for i, orig in enumerate(levels)}
             for h in headings:
                 try:
