@@ -89,6 +89,24 @@ def build_formatting_structure(element_tree, style_for, get_image_from_uri,
     # If this is changed, maybe update weasy.layout.page.make_margin_boxes()
     box = create_anonymous_boxes(box)
     box = set_viewport_overflow(box)
+
+    # Propagate aria-hidden based on DOM ancestry, before layout possibly
+    # re-parents out-of-flow boxes. This ensures hidden status sticks even
+    # if elements are moved in the layout tree (e.g., absolute positioning).
+    def _propagate_aria_hidden_flags(node, parent_hidden=False):
+        hidden = parent_hidden
+        if node.element is not None:
+            try:
+                if html.ascii_lower(node.element.get('aria-hidden', '')) == 'true':
+                    hidden = True
+            except Exception:
+                pass
+        node.aria_hidden = hidden
+        if isinstance(node, boxes.ParentBox):
+            for child in node.children:
+                _propagate_aria_hidden_flags(child, hidden)
+
+    _propagate_aria_hidden_flags(box, False)
     return box
 
 

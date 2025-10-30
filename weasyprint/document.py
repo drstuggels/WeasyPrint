@@ -82,7 +82,9 @@ class Page:
         gather_anchors(page_box, self.anchors, self.links, self.bookmarks, self.forms)
         self._page_box = page_box
 
-        # Compute and propagate aria-hidden flags across the box tree once.
+        # Compute and propagate aria-hidden flags across the box tree.
+        # Preserve any hidden flags computed earlier from DOM ancestry to avoid
+        # losing hidden state for out-of-flow boxes moved by layout.
         def _set_aria_hidden_flags(box, parent_hidden=False):
             hidden = parent_hidden
             if box.element is not None:
@@ -91,6 +93,8 @@ class Page:
                         hidden = True
                 except Exception:
                     pass
+            # Preserve prior hidden flag set during build (DOM-based)
+            hidden = hidden or getattr(box, 'aria_hidden', False)
             box.aria_hidden = hidden
             if isinstance(box, _boxes.ParentBox):
                 for child in box.children:
