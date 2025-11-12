@@ -28,6 +28,17 @@ class TagState:
         self.ids_in_table = defaultdict(set)
         self.logical_tables = {}
         self.struct_map = {}
+        # Map: table_uid -> { row_group_key -> StructElem }
+        # Used to keep a single StructElem for TBODY/THEAD/TFOOT across
+        # table fragments (eg. when a table is split across columns/pages).
+        self.row_groups_by_table = defaultdict(dict)
+        # Map transient table identifiers used during recursion to a stable
+        # logical key so that fragments share the same key across columns/pages.
+        self.table_keys = {}
+        # Compact indices for logical tables to make rewritten IDs stable
+        # and readable across fragments (1-based incrementing indices).
+        self.table_index_by_key = {}
+        self._next_table_index = 1
 
 
 def add_tags(pdf, document, page_streams, fix_headings_per_page=False):
@@ -304,15 +315,36 @@ def _build_box_tree(
         if has_footnotes:
             tag = 'Div'
 
-    element = pydyf.Dictionary({
-        'Type': '/StructElem',
-        'S': f'/{tag}',
-        'K': pydyf.Array([]),
-        'Pg': pdf.page_references[page_number],
-        'P': parent.reference,
-    })
-    pdf.add_object(element)
-    state.struct_map[element.reference] = element
+    # Row group (thead/tbody/tfoot) reuse across table fragments
+    reuse_row_group = False
+    existing_row_group = None
+    if tag in ('THead', 'TBody', 'TFoot') and current_table is not None:
+        # Prefer DOM element identity when available, fallback to tag name
+        # for implicit groups (there’s typically only one implicit TBODY).
+        group_key = (id(box.element) if box.element is not None
+                     else f'implicit:{tag}')
+        table_key = state.table_keys.get(current_table, current_table)
+        existing_row_group = state.row_groups_by_table.get(table_key, {}).get(group_key)
+        if existing_row_group is not None:
+            reuse_row_group = True
+
+    if reuse_row_group:
+        # Reuse previously created StructElem for this row group.
+        element = existing_row_group
+    else:
+        element = pydyf.Dictionary({
+            'Type': '/StructElem',
+            'S': f'/{tag}',
+            'K': pydyf.Array([]),
+            'Pg': pdf.page_references[page_number],
+            'P': parent.reference,
+        })
+        pdf.add_object(element)
+        state.struct_map[element.reference] = element
+        # Register row group for future table fragments
+        if tag in ('THead', 'TBody', 'TFoot') and current_table is not None:
+            table_key = state.table_keys.get(current_table, current_table)
+            state.row_groups_by_table[table_key][group_key] = element
 
     # Override element type based only on DPUB-ARIA roles
     if box.element is not None:
@@ -382,6 +414,9 @@ def _build_box_tree(
             target_table_elem = state.logical_tables[key]
         # Assign a unique identifier for this table context (for ID rewrite)
         table_uid = id(target_table_elem) if continuation else id(table)
+        # Register a stable logical key for this table to be reused by children
+        stable_key = key if key is not None else table_uid
+        state.table_keys[table_uid] = stable_key
     elif tag == 'TH':
         # Set identifier for table headers to reference them in cells
         # and register it in the document ID tree.
@@ -393,22 +428,26 @@ def _build_box_tree(
         if html_id:
             # Warn on duplicates within the same table
             if current_table is not None:
-                if html_id in state.ids_in_table[current_table]:
+                table_key = state.table_keys.get(current_table, current_table)
+                if html_id in state.ids_in_table[table_key]:
                     LOGGER.warning(
                         'Duplicate header id "%s" within the same table; header associations may be ambiguous',
                         html_id)
                 else:
-                    state.ids_in_table[current_table].add(html_id)
+                    state.ids_in_table[table_key].add(html_id)
             owner = state.seen_header_ids.get(html_id)
             if owner is None and current_table is not None:
-                state.seen_header_ids[html_id] = current_table
+                state.seen_header_ids[html_id] = table_key
                 assigned = html_id
-            elif owner == current_table or current_table is None:
+            elif owner == table_key or current_table is None:
                 assigned = html_id
             else:
-                # Duplicate in another table: rewrite locally
-                new_id = f"{html_id}__t{current_table}"
-                rewrites = state.rewrites_by_table.setdefault(current_table, {})
+                # Duplicate in another table: rewrite locally for this table
+                # Use a compact, stable table index for readability
+                table_index = state.table_index_by_key.get(
+                    state.table_keys.get(current_table, current_table), 0)
+                new_id = f"{html_id}__t{table_index}"
+                rewrites = state.rewrites_by_table.setdefault(table_key, {})
                 rewrites[html_id] = new_id
                 assigned = new_id
         else:
@@ -771,9 +810,10 @@ def _build_box_tree(
                 if cell.element is not None and 'headers' in cell.element.attrib:
                     # Rewrite explicit headers to local table IDs when needed
                     raw_tokens = cell.element.attrib.get('headers', '').split()
-                    # Find this table uid from earlier (use original target when merging)
-                    local_table = id(target_table_elem) if continuation else table_uid
-                    rewrites = state.rewrites_by_table.get(local_table, {})
+                    # Use stable logical table key so fragments share rewrites
+                    local_table_uid = id(target_table_elem) if continuation else table_uid
+                    local_table_key = state.table_keys.get(local_table_uid, local_table_uid)
+                    rewrites = state.rewrites_by_table.get(local_table_key, {})
                     # Deduplicate while preserving order
                     mapped = [rewrites.get(tok, tok) for tok in raw_tokens]
                     explicit_ids = [pydyf.String(t) for t in _unique(mapped)]
@@ -805,4 +845,9 @@ def _build_box_tree(
             # table element, do not yield a new table here.
             return
 
-    yield element
+    # For reused row groups (eg. TBODY in table continuations), avoid
+    # yielding the element again to prevent duplicate entries under /Table.
+    if reuse_row_group:
+        return
+    else:
+        yield element
