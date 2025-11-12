@@ -1,6 +1,7 @@
 """PDF tagging."""
 
 from collections import defaultdict
+import uuid
 
 import pydyf
 
@@ -39,6 +40,9 @@ class TagState:
         # and readable across fragments (1-based incrementing indices).
         self.table_index_by_key = {}
         self._next_table_index = 1
+        # Per-document unique prefix applied to all exported StructElem IDs
+        # to avoid collisions when PDFs are merged together.
+        self.doc_prefix = f"d{uuid.uuid4().hex[:8]}"
 
 
 def add_tags(pdf, document, page_streams, fix_headings_per_page=False):
@@ -426,33 +430,38 @@ def _build_box_tree(
             html_id = box.element.attrib.get('id')
         # Rewrite duplicate IDs across tables to keep Names unique
         if html_id:
-            # Warn on duplicates within the same table
+            # Resolve logical table key for this TH (may be None)
+            table_key_current = state.table_keys.get(current_table, current_table)
+            # Warn on duplicates within the same logical table
             if current_table is not None:
-                table_key = state.table_keys.get(current_table, current_table)
-                if html_id in state.ids_in_table[table_key]:
+                if html_id in state.ids_in_table[table_key_current]:
                     LOGGER.warning(
                         'Duplicate header id "%s" within the same table; header associations may be ambiguous',
                         html_id)
                 else:
-                    state.ids_in_table[table_key].add(html_id)
+                    state.ids_in_table[table_key_current].add(html_id)
             owner = state.seen_header_ids.get(html_id)
             if owner is None and current_table is not None:
-                state.seen_header_ids[html_id] = table_key
+                state.seen_header_ids[html_id] = table_key_current
                 assigned = html_id
-            elif owner == table_key or current_table is None:
+            elif owner == table_key_current or current_table is None:
                 assigned = html_id
             else:
                 # Duplicate in another table: rewrite locally for this table
-                # Use a compact, stable table index for readability
-                table_index = state.table_index_by_key.get(
-                    state.table_keys.get(current_table, current_table), 0)
+                # Ensure the current logical table has a compact, stable index
+                if table_key_current not in state.table_index_by_key:
+                    idx = state._next_table_index
+                    state.table_index_by_key[table_key_current] = idx
+                    state._next_table_index += 1
+                table_index = state.table_index_by_key[table_key_current]
                 new_id = f"{html_id}__t{table_index}"
-                rewrites = state.rewrites_by_table.setdefault(table_key, {})
+                rewrites = state.rewrites_by_table.setdefault(table_key_current, {})
                 rewrites[html_id] = new_id
                 assigned = new_id
         else:
             assigned = str(id(box))
-        th_id = pydyf.String(assigned)
+        # Apply document-level prefix to ensure uniqueness across merged PDFs
+        th_id = pydyf.String(f"{state.doc_prefix}:{assigned}")
         element['ID'] = th_id
         # Add Scope attribute when available from HTML.
         scope_attr = None
@@ -816,7 +825,8 @@ def _build_box_tree(
                     rewrites = state.rewrites_by_table.get(local_table_key, {})
                     # Deduplicate while preserving order
                     mapped = [rewrites.get(tok, tok) for tok in raw_tokens]
-                    explicit_ids = [pydyf.String(t) for t in _unique(mapped)]
+                    # Prefix with the per-document namespace to match TH IDs
+                    explicit_ids = [pydyf.String(f"{state.doc_prefix}:{t}") for t in _unique(mapped)]
                     if explicit_ids:
                         attr = elem.get('A') or pydyf.Dictionary({'O': '/Table'})
                         attr['Headers'] = pydyf.Array(explicit_ids)
