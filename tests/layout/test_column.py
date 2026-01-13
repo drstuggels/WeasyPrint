@@ -3,6 +3,7 @@
 import pytest
 
 from ..testing_utils import assert_no_logs, render_pages
+from weasyprint.formatting_structure import boxes
 
 
 @assert_no_logs
@@ -435,6 +436,37 @@ def test_column_span_balance():
     assert section.children[0].children[0].text == 'line1'
     assert column3.children[0].children[0].children[0].text == 'ghi'
     assert column3.children[0].children[1].children[0].text == 'jkl'
+
+
+@assert_no_logs
+def test_columns_balance_with_overflowing_margins():
+    page, = render_pages('''
+      <style>
+        @page { margin: 0; size: 12px 10px }
+        body { margin: 0; font-family: weasyprint; font-size: 1px;
+               line-height: 1 }
+        #cols { columns: 3; column-gap: 0 }
+        p { margin: 0 }
+        p.last { margin-bottom: 5px }
+        .end { height: 0; margin: 0 }
+      </style>
+      <div id="cols">
+        <p>a</p><p>b</p><p>c</p><p>d</p><p>e</p><p class="last">f</p>
+        <div class="end"></div>
+      </div>
+    ''')
+    html, = page.children
+    body, = html.children
+    div, = body.children
+    column1, column2 = div.children
+
+    def texts(column):
+        return [
+            box.text for box in column.descendants()
+            if isinstance(box, boxes.TextBox)]
+
+    assert texts(column1) == ['a', 'b', 'c']
+    assert texts(column2) == ['d', 'e', 'f']
 
 
 @assert_no_logs

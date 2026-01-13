@@ -260,9 +260,13 @@ def columns_layout(context, box, bottom_space, skip_stack, containing_block,
                     footnote_area_heights.append(last_footnotes_height)
                     continue
 
-                everything_fits = (
-                    not column_skip_stack and
-                    max(consumed_heights) <= max_height)
+                # Consider that the content fits as soon as it has been fully
+                # rendered, even if it slightly overflows the available height.
+                #
+                # Some layouts (eg. bottom margins and break-avoid constraints)
+                # can lead to tiny overflows without any remaining content to
+                # lay out. In this case, we still want to try balancing.
+                everything_fits = not column_skip_stack
                 if everything_fits:
                     # Everything fits, start expanding columns at the average
                     # of the column heights
