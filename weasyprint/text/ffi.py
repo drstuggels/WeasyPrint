@@ -30,6 +30,8 @@ ffi.cdef('''
     hb_blob_t * hb_ot_color_glyph_reference_png (hb_font_t *font, hb_codepoint_t glyph);
     bool hb_ot_color_has_svg (hb_face_t *face);
     hb_blob_t * hb_ot_color_glyph_reference_svg (hb_face_t *face, hb_codepoint_t glyph);
+    hb_bool_t hb_font_get_nominal_glyph (
+        hb_font_t *font, hb_codepoint_t unicode, hb_codepoint_t *glyph);
     void hb_blob_destroy (hb_blob_t *blob);
     unsigned int hb_face_get_table_tags (
         const hb_face_t *face, unsigned int start_offset, unsigned int *table_count,

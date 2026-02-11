@@ -8,11 +8,42 @@ from PIL import Image
 from ..images import RasterImage, SVGImage
 from ..logger import LOGGER
 from ..matrix import Matrix
-from ..text.ffi import FROM_UNITS, TO_UNITS, ffi, pango
+from ..text.ffi import FROM_UNITS, TO_UNITS, ffi, harfbuzz, pango
 from ..text.fonts import get_hb_object_data
 from ..text.line_break import get_last_word_end
 from .border import draw_line
 from .color import get_color
+
+
+def _get_space_glyph(font, pango_font, font_size, stream):
+    cached = getattr(font, '_pdf_text_extraction_space_glyph', None)
+    if cached:
+        return cached
+
+    glyph_id = None
+    # Prefer a space glyph already used in this font subset.
+    for gid, unicode_value in font.to_unicode.items():
+        if unicode_value == ' ':
+            glyph_id = gid
+            break
+
+    # Fallback: ask HarfBuzz for the nominal space glyph.
+    if glyph_id is None:
+        glyph_pointer = ffi.new('hb_codepoint_t *')
+        if not harfbuzz.hb_font_get_nominal_glyph(font.hb_font, 0x20, glyph_pointer):
+            return None
+        glyph_id = int(glyph_pointer[0])
+
+    if glyph_id not in font.to_unicode:
+        font.to_unicode[glyph_id] = ' '
+    if glyph_id not in font.widths:
+        pango.pango_font_get_glyph_extents(
+            pango_font, glyph_id, stream.ink_rect, stream.logical_rect)
+        font.widths[glyph_id] = round(
+            stream.logical_rect.width * 1000 * FROM_UNITS / font_size)
+
+    font._pdf_text_extraction_space_glyph = (glyph_id, font.widths[glyph_id])
+    return font._pdf_text_extraction_space_glyph
 
 
 def draw_text(stream, textbox, offset_x, text_overflow, block_ellipsis):
@@ -139,6 +170,7 @@ def draw_first_line(stream, textbox, text_overflow, block_ellipsis, matrix):
     string = ''
     x_advance = 0
     emojis = []
+    suffix = getattr(textbox, 'pdf_text_extraction_suffix', '')
     run = first_line.runs[0]
     while run != ffi.NULL:
         # Get Pango objects.
@@ -278,6 +310,18 @@ def draw_first_line(stream, textbox, text_overflow, block_ellipsis, matrix):
             string = string[:-1]
         else:
             string += '>'
+
+    if suffix:
+        space = _get_space_glyph(font, pango_font, font_size, stream)
+        if space is not None:
+            glyph_id, _ = space
+            glyph_hex = f'{glyph_id:02x}' if font.bitmap else f'{glyph_id:04x}'
+            if string.endswith('>'):
+                string = string[:-1] + glyph_hex + '>'
+            else:
+                # The TJ array may end with a numeric adjustment, append a new
+                # glyph string to keep the separator in extracted text.
+                string += f'<{glyph_hex}>'
 
     # Draw text.
     stream.show_text(string)

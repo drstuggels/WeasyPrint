@@ -278,9 +278,6 @@ class Stream(pydyf.Stream):
                 assert box not in self._tags
                 self._tags[box] = {'tag': tag, 'mcid': mcid}
                 property_list = pydyf.Dictionary({'MCID': mcid})
-                suffix = getattr(box, 'pdf_actual_text_suffix', '')
-                if suffix:
-                    property_list['ActualText'] = pydyf.String(f'{box.text}{suffix}')
                 super().begin_marked_content(tag, property_list)
                 began = True
         try:

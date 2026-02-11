@@ -35,16 +35,25 @@ def iter_line_boxes(context, box, position_y, bottom_space, skip_stack,
         resolve_one_percentage(box, 'text_indent', containing_block.width)
     else:
         box.text_indent = 0
+    previous_line = None
     while True:
-        line, resume_at = get_next_linebox(
+        line, resume_at, stripped_leading_whitespace = get_next_linebox(
             context, box, position_y, bottom_space, skip_stack,
             containing_block, absolute_boxes, fixed_boxes, first_letter_style)
         if line:
+            if stripped_leading_whitespace and previous_line is not None:
+                last_box = previous_line
+                while isinstance(last_box, (boxes.LineBox, boxes.InlineBox)) and last_box.children:
+                    last_box = last_box.children[-1]
+                if isinstance(last_box, boxes.TextBox):
+                    if not getattr(last_box, 'pdf_text_extraction_suffix', ''):
+                        last_box.pdf_text_extraction_suffix = ' '
             handle_leader(context, line, containing_block)
             position_y = line.position_y + line.height
         if line is None:
             return
         yield line, resume_at
+        previous_line = line
         if resume_at is None:
             return
         skip_stack = resume_at
@@ -64,9 +73,9 @@ def get_next_linebox(context, linebox, position_y, bottom_space, skip_stack,
 
     """
 
-    skip_stack = skip_first_whitespace(linebox, skip_stack)
+    skip_stack, stripped_leading_whitespace = skip_first_whitespace(linebox, skip_stack)
     if skip_stack == 'continue':
-        return None, None
+        return None, None, False
 
     skip_stack = first_letter_to_box(linebox, skip_stack, first_letter_style)
 
@@ -183,7 +192,7 @@ def get_next_linebox(context, linebox, position_y, bottom_space, skip_stack,
     if float_children:
         line.children += tuple(float_children)
 
-    return line, resume_at
+    return line, resume_at, stripped_leading_whitespace
 
 
 def skip_first_whitespace(box, skip_stack):
@@ -204,27 +213,30 @@ def skip_first_whitespace(box, skip_stack):
         text = box.text.encode()
         if index == len(text):
             # Starting a the end of the TextBox, no text to see: Continue
-            return 'continue'
+            return 'continue', False
+        stripped = False
         if white_space in ('normal', 'nowrap', 'pre-line'):
             text = text[index:]
             while text and text.startswith(b' '):
                 index += 1
                 text = text[1:]
-        return {index: None} if index else None
+                stripped = True
+        return ({index: None} if index else None), stripped
 
     if isinstance(box, (boxes.LineBox, boxes.InlineBox)):
         if index == 0 and not box.children:
-            return None
-        result = skip_first_whitespace(box.children[index], next_skip_stack)
+            return None, False
+        result, stripped = skip_first_whitespace(box.children[index], next_skip_stack)
         if result == 'continue':
             index += 1
             if index >= len(box.children):
-                return 'continue'
-            result = skip_first_whitespace(box.children[index], None)
-        return {index: result} if (index or result) else None
+                return 'continue', stripped
+            result, stripped_next = skip_first_whitespace(box.children[index], None)
+            stripped = stripped or stripped_next
+        return ({index: result} if (index or result) else None), stripped
 
     assert skip_stack is None, f'unexpected skip inside {box}'
-    return None
+    return None, False
 
 
 def remove_last_whitespace(context, line):
@@ -249,7 +261,7 @@ def remove_last_whitespace(context, line):
     if new_text:
         if len(new_text) == len(original_text):
             return
-        box.pdf_actual_text_suffix = original_text[len(new_text):]
+        box.pdf_text_extraction_suffix = original_text[len(new_text):]
         box.text = new_text
         new_box, resume, _ = split_text_box(context, box, None, 0)
         assert new_box is not None
@@ -942,7 +954,7 @@ def split_text_box(context, box, available_width, skip, is_line_start=True):
         preserved_line_break = (
             (length != resume_index) and between.strip(' '))
         if box is not None and between and not preserved_line_break and between.strip() == '':
-            box.pdf_actual_text_suffix = ' '
+            box.pdf_text_extraction_suffix = ' '
         if preserved_line_break:
             # See https://unicode.org/reports/tr14/
             # \r is already handled by process_whitespace
