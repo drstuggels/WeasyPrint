@@ -244,10 +244,12 @@ def remove_last_whitespace(context, line):
     if not (isinstance(box, boxes.TextBox) and
             box.style['white_space'] in ('normal', 'nowrap', 'pre-line')):
         return
-    new_text = box.text.rstrip(' ')
+    original_text = box.text
+    new_text = original_text.rstrip(' ')
     if new_text:
-        if len(new_text) == len(box.text):
+        if len(new_text) == len(original_text):
             return
+        box.pdf_actual_text_suffix = original_text[len(new_text):]
         box.text = new_text
         new_box, resume, _ = split_text_box(context, box, None, 0)
         assert new_box is not None
@@ -939,6 +941,8 @@ def split_text_box(context, box, available_width, skip, is_line_start=True):
         between = text[length:resume_index].decode()
         preserved_line_break = (
             (length != resume_index) and between.strip(' '))
+        if box is not None and between and not preserved_line_break and between.strip() == '':
+            box.pdf_actual_text_suffix = ' '
         if preserved_line_break:
             # See https://unicode.org/reports/tr14/
             # \r is already handled by process_whitespace
