@@ -3,6 +3,7 @@
 import io
 import math
 import struct
+from copy import deepcopy
 from hashlib import md5
 from io import BytesIO
 from itertools import cycle
@@ -255,6 +256,10 @@ class LazyLocalImage(pydyf.Object):
 
 class SVGImage:
     def __init__(self, tree, base_url, url_fetcher, context):
+        # SVG drawing temporarily mutates some definition elements (patterns,
+        # masks and images).  Keep an untouched tree for other output formats
+        # that serialize the original vector image after PDF painting.
+        self._xhtml_source = deepcopy(tree)
         font_config = context.font_config if context else None
         self._svg = SVG(tree, base_url, font_config)
         self._base_url = base_url

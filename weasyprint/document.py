@@ -11,10 +11,9 @@ from .css import get_all_computed_styles
 from .css.counters import CounterStyle
 from .css.targets import TargetCollector
 from .draw import draw_page
-from .html import ascii_lower
 from .formatting_structure import boxes as _boxes
 from .formatting_structure.build import build_formatting_structure
-from .html import get_html_metadata
+from .html import ascii_lower, get_html_metadata
 from .images import get_image_from_uri as original_get_image_from_uri
 from .layout import LayoutContext, layout_document
 from .logger import PROGRESS_LOGGER
@@ -328,8 +327,43 @@ class Document:
             pages = self.pages
         elif not isinstance(pages, list):
             pages = list(pages)
-        return type(self)(
+        document = type(self)(
             pages, self.metadata, self.url_fetcher, self.font_config)
+        # The source tree is useful to output formats that need to retain the
+        # document's logical structure.  Keep it when copying pages, just as
+        # metadata and the URL fetcher are kept above.
+        if hasattr(self, '_html'):
+            document._html = self._html
+        return document
+
+    def write_xhtml_fragment(self, target=None, *, fragment_id=None):
+        """Write a fixed-layout, semantic XHTML fragment manifest.
+
+        The manifest is JSON and is meant to be combined with manifests from
+        other :class:`Document` objects.  It contains one XHTML ``section``
+        per rendered page, a shared stylesheet, page dimensions in CSS pixels,
+        an opaque anchor map, and manifest-only source metadata for links whose
+        targets are rendered in other fragments.  Source anchor names are
+        never copied into page XHTML.  The manifest is generated from this
+        document's final page box tree, so it must not trigger another layout
+        pass.
+
+        :type target:
+            :class:`str`, :class:`pathlib.Path` or :term:`file object`
+        :param target:
+            A filename where the fragment manifest is generated, a binary
+            file object, or :obj:`None`.
+        :param fragment_id:
+            An optional stable value used only to generate collision-resistant
+            opaque identifiers.  The value itself is not copied to XHTML.
+        :returns:
+            The UTF-8 JSON manifest as :obj:`bytes` when ``target`` is
+            :obj:`None`, otherwise :obj:`None`.
+
+        """
+        from .xhtml import write_xhtml_fragment
+
+        return write_xhtml_fragment(self, target, fragment_id=fragment_id)
 
     def make_bookmark_tree(self, scale=1, transform_pages=False):
         """Make a tree of all bookmarks in the document.
