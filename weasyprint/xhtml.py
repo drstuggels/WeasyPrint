@@ -602,6 +602,8 @@ class _Exporter:
             cell_ids[id(descendant)] = identifier
             source_to_local.setdefault(source_id, identifier)
 
+        emitted_cells = []
+
         def add_rows(parent, children):
             for child in children:
                 if isinstance(child, boxes.TableRowGroupBox):
@@ -625,6 +627,11 @@ class _Exporter:
                             row, f'{_XHTML}{cell_tag}', {'class': 'wp-semantic'})
                         self._table_cell_attributes(
                             cell_box, cell, cell_ids, source_to_local)
+                        emitted_cells.append((
+                            cell,
+                            cell_box.grid_x,
+                            cell_box.colspan,
+                        ))
                         for descendant in cell_box.descendants(placeholders=True):
                             if descendant is cell_box:
                                 continue
@@ -640,6 +647,19 @@ class _Exporter:
                     add_rows(parent, child.children)
 
         add_rows(element, table.children)
+        # Paginated table fragments can retain source colspans for columns
+        # that have no cell beginning in them on this page.  These empty
+        # layout-only columns make the fragment's HTML table model invalid and
+        # carry no data.  Compress them while preserving every actual cell and
+        # the spans across columns that do contain cells.
+        starts = {grid_x for _cell, grid_x, _colspan in emitted_cells}
+        for cell, grid_x, colspan in emitted_cells:
+            semantic_span = sum(
+                grid_x <= start < grid_x + colspan for start in starts)
+            if semantic_span > 1:
+                cell.set('colspan', str(semantic_span))
+            else:
+                cell.attrib.pop('colspan', None)
         self.stats['tables'] += 1
         return element
 
