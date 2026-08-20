@@ -383,14 +383,18 @@ def _build_box_tree(
             'O': '/Layout',
             'BBox': pydyf.Array((x1, y1, x2, y2)),
         })
-        # Always set Alt on /Figure. For <img>/<svg>/<figure>, use HTML alt
-        # when present; otherwise set empty string.
+        # Always set Alt on /Figure. Prefer the ARIA accessible name, then the
+        # native HTML alternative text. Whitespace is normalized because
+        # template formatting must not leak into the spoken description.
         alt_value = ''
         if box.element is not None:
             if element_tag in ('img', 'figure') or (
                 isinstance(element_tag, str) and (element_tag == 'svg' or element_tag.endswith('}svg'))
             ):
-                alt_value = box.element.attrib.get('alt', '')
+                alt_value = (
+                    box.element.attrib.get('aria-label') or
+                    box.element.attrib.get('alt', ''))
+                alt_value = ' '.join(alt_value.split())
         element['Alt'] = pydyf.String(alt_value)
     elif tag == 'Table':
         # Use wrapped table as tagged box, and put captions in it.
