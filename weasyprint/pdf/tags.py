@@ -254,6 +254,13 @@ def _build_box_tree(
         return
     tag = _get_pdf_tag(element_tag)
 
+    # Table layout creates anonymous row-group and row boxes that can retain
+    # the originating ``table`` element, notably when the table is empty.
+    # They are implementation details of the table wrapper, not additional
+    # semantic tables, and cannot be passed to get_wrapped_table().
+    if tag == 'Table' and not getattr(box, 'is_table_wrapper', False):
+        tag = 'NonStruct'
+
     # Special case for html, body, page boxes and margin boxes.
     if element_tag in ('html', 'body') or isinstance(box, boxes.PageBox):
         # Avoid generate page, html and body boxes as a semantic node, yield children.
